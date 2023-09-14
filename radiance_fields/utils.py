@@ -14,14 +14,14 @@ import numpy as np
 import torch
 
 from nerfacc.estimators.occ_grid import OccGridEstimator
-from nerfacc.estimators.prop_net import PropNetEstimator
+from nerfacc.estimators.prop_net import PropNetEstimator 
 from nerfacc.grid import ray_aabb_intersect, traverse_grids
-from nerfacc.volrend import (
+from .variable_channel_rendering import (
     accumulate_along_rays_,
     render_weight_from_density,
-    rendering,
+    variable_rendering,
 )
-
+import gc
 import collections
 
 Rays = collections.namedtuple("Rays", ("origins", "viewdirs"))
@@ -56,6 +56,10 @@ def render_image_with_occgrid(
     test_chunk_size: int = 8192,
     # only useful for dnerf
     timestamps: Optional[torch.Tensor] = None,
+    #convolutional MLP
+    conv_mlp: torch.nn.Module = None,
+    render_channels: int = 16,
+    patch_size: int = 10,
 ):
     """Render the pixels of an image."""
     rays_shape = rays.origins.shape
@@ -131,8 +135,14 @@ def render_image_with_occgrid(
         if radiance_field.training
         else test_chunk_size
     )
+    
     for i in range(0, num_rays, chunk):
+        #print(i*chunk)
+        
         chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
+        # print("Chunk rays origins shape:",chunk_rays.origins.shape)
+        # print("Chunk rays viewdirs shape:", chunk_rays.viewdirs.shape)
+        
         ray_indices, t_starts, t_ends = estimator.sampling(
             chunk_rays.origins,
             chunk_rays.viewdirs,
@@ -144,23 +154,30 @@ def render_image_with_occgrid(
             cone_angle=cone_angle,
             alpha_thre=alpha_thre,
         )
-        rgb, opacity, depth, extras = rendering(
+        rgb, opacity, depth, extras = variable_rendering(
             t_starts,
             t_ends,
             ray_indices,
             n_rays=chunk_rays.origins.shape[0],
             rgb_sigma_fn=rgb_sigma_fn,
             render_bkgd=render_bkgd,
+            num_channels=render_channels
         )
-        # chunk_results = [rgb, opacity, depth, extras['alphas'], extras['rgbs'], ray_indices+i, len(t_starts)]
+        if conv_mlp is not None:
+            rgb = rgb.reshape(int(rgb.shape[0]/patch_size**2), patch_size, patch_size, rgb.shape[1])
+            rgb = rgb.permute(0, 3, 1, 2)
+            rgb = conv_mlp(rgb)
+        
+        chunk_results = [rgb, opacity, depth, extras['alphas'], extras['rgbs'], ray_indices+i, len(t_starts)]
         chunk_results = [rgb, opacity, depth, len(t_starts)]
         results.append(chunk_results)
+       
     rgbs, opacities, depths, n_rendering_samples = [
         torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
         for r in zip(*results)
     ]
     return (
-        rgbs.view((*rays_shape[:-1], -1)),
+        rgbs.reshape((*rays_shape[:-1], -1)),
         opacities.view((*rays_shape[:-1], -1)),
         depths.view((*rays_shape[:-1], -1)),
         sum(n_rendering_samples),

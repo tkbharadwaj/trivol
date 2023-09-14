@@ -55,13 +55,13 @@ class MLP(nn.Module):
                 in_features = self.net_width + self.input_dim
             else:
                 in_features = self.net_width
+
         if self.output_enabled:
             self.output_layer = nn.Linear(
                 in_features, self.output_dim, bias=bias_enabled
             )
         else:
             self.output_dim = in_features
-
         self.initialize()
 
     def initialize(self):
@@ -110,6 +110,76 @@ class DenseLayer(MLP):
             **kwargs,
         )
 
+class ConvolutionalNerfMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,  # The number of input tensor channels.
+        rgb_dim: int,
+        condition_dim: int,  # The number of condition tensor channels.
+        net_depth: int = 8,  # The depth of the MLP.
+        net_width: int = 256,  # The width of the MLP.
+        skip_layer: int = 4,  # The layer to add skip layers to.
+        net_depth_condition: int = 1,  # The depth of the second part of MLP.
+        net_width_condition: int = 128,  # The width of the second part of MLP.
+    ):
+        super().__init__()
+        self.base = MLP(
+            input_dim=input_dim,
+            net_depth=net_depth,
+            net_width=net_width,
+            skip_layer=skip_layer,
+            output_enabled=False,
+        )
+        hidden_features = self.base.output_dim
+        self.sigma_layer = DenseLayer(hidden_features, 1)
+
+        if condition_dim > 0:
+            self.bottleneck_layer = DenseLayer(hidden_features, net_width)
+            self.rgb_layer = DenseLayer(
+                input_dim=net_width + condition_dim,
+                output_dim=128,
+            )
+            self.conv_layers = nn.Sequential( 
+                nn.Conv2d(1, 8, 3, padding = 1),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(8, 1, 3, padding = 1),
+                nn.ReLU(),
+            )
+            self.fcs = nn.Sequential(
+                nn.Linear(int(16/2*8/2), 3),
+                nn.Sigmoid()
+            )
+        else:
+            self.rgb_layer = DenseLayer(hidden_features, 3)
+
+    def query_density(self, x):
+        x = self.base(x)
+        raw_sigma = self.sigma_layer(x)
+        return raw_sigma
+
+    def forward(self, x, condition=None):
+        x = self.base(x)
+        raw_sigma = self.sigma_layer(x)
+        raw_rgb = None
+        if condition is not None:
+            if condition.shape[:-1] != x.shape[:-1]:
+                num_rays, n_dim = condition.shape
+                condition = condition.view(
+                    [num_rays] + [1] * (x.dim() - condition.dim()) + [n_dim]
+                ).expand(list(x.shape[:-1]) + [n_dim])
+            bottleneck = self.bottleneck_layer(x)
+            x = torch.cat([bottleneck, condition], dim=-1)
+            raw_rgb = self.rgb_layer(x)
+            batch_size = raw_rgb.shape[0]
+            raw_rgb = raw_rgb.view(batch_size, 1, 16, 8)
+            raw_rgb = self.conv_layers(raw_rgb)
+            raw_rgb = raw_rgb.view(x.size(0) , -1)
+            raw_rgb = self.fcs(raw_rgb)
+        else:
+            raw_rgb = self.rgb_layer(x)
+
+        return raw_rgb, raw_sigma
 
 class NerfMLP(nn.Module):
     def __init__(
@@ -203,7 +273,6 @@ class SinusoidalEncoder(nn.Module):
             latent = torch.cat([x] + [latent], dim=-1)
         return latent
 
-
 class TriVolNeRFRadianceField(nn.Module):
     def __init__(
         self,
@@ -218,7 +287,7 @@ class TriVolNeRFRadianceField(nn.Module):
         super().__init__()
         self.posi_encoder = SinusoidalEncoder(3, 0, 3, True)
         self.view_encoder = SinusoidalEncoder(3, 0, 2, True)
-        self.mlp = NerfMLP(
+        self.mlp = ConvolutionalNerfMLP(
             input_dim=self.posi_encoder.latent_dim + feat_dim*3,
             rgb_dim=rgb_dim,
             condition_dim=self.view_encoder.latent_dim,
@@ -246,7 +315,7 @@ class TriVolNeRFRadianceField(nn.Module):
         x = self.posi_encoder(x) * 0
         x = torch.cat([x, f], dim=-1)
         if condition is not None:
-            condition = self.view_encoder(condition) * 0
+            condition = self.view_encoder(condition)
         rgb, sigma = self.mlp(x, condition=condition)
         return torch.sigmoid(rgb), F.relu(sigma)
 
@@ -266,17 +335,3 @@ class TriVolNeRFRadianceField_Latent(nn.Module):
         rgb = f[..., :self.rgb_dim]
         sigma = f[..., self.rgb_dim:]
         return rgb, F.relu(sigma)
-
-class ConvolutionalMLP(nn.Module):
-    def __init__(
-        self,
-        in_channels: int = 16
-    ):
-        super().__init__()
-        self.conv_layer = nn.Conv2d(16, 3, 3, padding = 1)
-        self.sigmoid = nn.Sigmoid()
-    def forward(self, x):
-        x = self.conv_layer(x)
-        x = self.sigmoid(x)
-        return x
-

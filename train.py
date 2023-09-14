@@ -48,7 +48,7 @@ from utils import *
 
 from models.unet3d import *
 
-from radiance_fields.mlp import TriVolNeRFRadianceField
+from radiance_fields.mlp import TriVolNeRFRadianceField, ConvolutionalMLP
 from nerfacc.estimators.occ_grid import OccGridEstimator
 from radiance_fields.utils import render_image_with_occgrid, Rays
 ####################################################################################
@@ -126,26 +126,30 @@ class TriVolModule(LightningModule):
         max_epochs=200,
         patch_size=64,
         feat_dim=32,
+        render_dimension=16,
     ):
-        super().__init__()
+        super().__init__() 
+        self.save_hyperparameters()
         for name, value in vars().items():
             if name != "self":
                 setattr(self, name, value)
         
-        self.trivol_encoder = TriVol_Encoder(in_channels=4, out_channels=args.feat_dim, num_groups=16, nf=32)
+        self.trivol_encoder = TriVol_Encoder(in_channels=4, out_channels=feat_dim, num_groups=16, nf=32)
+        self.render_dimension = render_dimension
         self.radiance_field = TriVolNeRFRadianceField(
-            feat_dim=args.feat_dim,
-            rgb_dim=3,
+            feat_dim=feat_dim,
+            rgb_dim=16,
             net_depth=4,  # The depth of the MLP.
             net_width=128,  # The width of the MLP.
             skip_layer=2,  # The layer to add skip layers to.
             net_depth_condition=1,  # The depth of the second part of MLP.
             net_width_condition=128,  # The width of the second part of MLP.
             )
-
+        
         # background color
-        self.render_bkgd = nn.Parameter(torch.ones(1, 3, dtype=torch.float32), requires_grad=False)
-
+        self.render_bkgd = nn.Parameter(torch.ones(1, render_dimension, dtype=torch.float32), requires_grad=False)
+        #convolutional MLP which is used for extracting RGB from pseudo-rendered values
+        self.conv_mlp = ConvolutionalMLP(in_channels = self.render_dimension)
         # model parameters
         self.grid_resolution = 128
         grid_nlvl = 1
@@ -154,7 +158,7 @@ class TriVolModule(LightningModule):
             self.render_step_size = 2e-3
         else:
             self.render_step_size = 1e-2
-        self.test_chunk_size = 800
+        self.test_chunk_size = 640
         
         aabb = torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0])
         aabb = nn.Parameter(aabb, requires_grad=False)
@@ -165,6 +169,7 @@ class TriVolModule(LightningModule):
         self.validation_outputs = []
 
     def train_dataloader(self):
+        #print("loaded data\n\n\n\n")
         if self.dataset == 'shapenet':
             self.train_dataset =  ShapeNetDataset(self.train_mode, 
                                                     scene_dir=self.scene_dir)
@@ -176,7 +181,7 @@ class TriVolModule(LightningModule):
                                                     scene_dir=self.scene_dir)
         else:
             self.train_dataset =  ScanNetDataset(self.train_mode, 
-                                                    scene_dir=self.scene_dir)
+                                                    scene_dir=self.scene_dir, patch_size = self.patch_size)
         
         return DataLoader(
             self.train_dataset,
@@ -189,6 +194,7 @@ class TriVolModule(LightningModule):
         )
 
     def val_dataloader(self):
+        #print("loaded data\n\n\n\n")
         if self.dataset == 'shapenet':
             self.val_dataset =  ShapeNetDataset(self.val_mode, 
                                                     scene_dir=self.scene_dir)
@@ -198,7 +204,7 @@ class TriVolModule(LightningModule):
         else:
             self.val_dataset =  ScanNetDataset(self.val_mode, 
                                                     scene_dir=self.scene_dir)
-
+       
         return DataLoader(
             self.val_dataset,
             batch_size=self.val_batch_size,
@@ -219,7 +225,9 @@ class TriVolModule(LightningModule):
         rgbs_gt = batch['rgbs'].reshape(-1, 3) # (B*H*W, 3)
         img_path = batch['filename']
 
-        if is_training:
+
+        #Not useful, out batch provides meaningful spatial informatio
+        if is_training and False:
             ## random choice (patch * patch,) vector
             num_rays = self.patch_size ** 2
             idx_rand = torch.randperm(rays_o.shape[0])[:num_rays]
@@ -233,7 +241,6 @@ class TriVolModule(LightningModule):
         # dense encoder
         voxels_xyz = self.trivol_encoder(voxels) # (B, feat_dim, P, S, S)
         rays = Rays(origins=rays_o, viewdirs=rays_d)
-
         self.estimator.aabbs = aabb.reshape(1, 6)
         rgbs_prd, acc, depths_prd, _ = render_image_with_occgrid(
                     self.radiance_field,
@@ -244,7 +251,10 @@ class TriVolModule(LightningModule):
                     render_step_size=self.render_step_size,
                     render_bkgd=self.render_bkgd,
                     test_chunk_size=self.test_chunk_size,
-                    alpha_thre=0
+                    alpha_thre=0,
+                    conv_mlp = self.conv_mlp,
+                    patch_size = self.patch_size,
+                    render_channels = self.render_dimension
                     )
         if not is_training:
             # # resize to image
@@ -285,7 +295,6 @@ class TriVolModule(LightningModule):
     
     def validation_step(self, batch, batch_idx):
         rgbs_prd, rgbs_gt, depths_prd, img_path = self(batch, is_training=False, batch_idx=batch_idx)
-
         # save image
         rgb_prd = rgbs_prd[0].cpu()
         rgb_gt = rgbs_gt[0].cpu()
@@ -369,7 +378,25 @@ class TriVolModule(LightningModule):
         # scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lambda epoch: 0.1**(epoch/float(self.max_epochs)))
         return [self.optimizer], [] # [scheduler]
 
+    def predict_step(self, batch, batch_idx):
+        rgbs_prd, rgbs_gt, depths_prd, img_path = self(batch, is_training=False, batch_idx=batch_idx)
+        rgb_prd = rgbs_prd[0].cpu()
+        depths_prd = depths_prd[0].cpu()
+        depth = visualize_depth(depths_prd)
+        rgbs_prd_numpy = (rgbs_prd.permute(0, 2, 3, 1).clone().detach().cpu().numpy()) * 255.0
 
+        stack_nerf = torch.cat([ rgb_prd, depth], dim=-1) # (3, H, W)
+
+        img_path = img_path[0]
+        img_path = os.path.join("logs", img_path)
+
+        cv2.imwrite(img_path, rgbs_prd_numpy[0], [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+        stack_nerf = (stack_nerf.permute(1,2,0)*255.0).cpu().numpy().astype(np.uint8)[..., [2, 1, 0]]
+        stack_nerf = cv2.UMat(stack_nerf)
+        # cv2.putText(stack_nerf, "PSNR: %0.2f" % psnr_o, (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
+        cv2.imwrite(img_path, stack_nerf, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+
+        return rgbs_prd, depths_prd
 if __name__ == "__main__":
     pa = argparse.ArgumentParser()
     pa.add_argument("--scene_dir", type=str, default="", help="scene dir")
@@ -405,7 +432,8 @@ if __name__ == "__main__":
                             val_mode=args.val_mode,
                             patch_size=args.patch_size,
                             img_wh=args.img_wh,
-                            feat_dim=args.feat_dim)
+                            feat_dim=args.feat_dim,
+                            render_dimension = 16)
 
     tb_logger = pl_loggers.TensorBoardLogger("logs/%s" % args.exp_name)
     
@@ -423,6 +451,6 @@ if __name__ == "__main__":
                       num_nodes=1,
                       logger=tb_logger,
                       callbacks=[checkpoint_callback],
-                      num_sanity_val_steps=1
+                      num_sanity_val_steps=0
                       )
     trainer.fit(pl_module, ckpt_path=args.resume_path)

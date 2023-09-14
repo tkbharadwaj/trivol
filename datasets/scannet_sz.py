@@ -17,25 +17,20 @@ from torch_scatter import scatter_mean
 
 
 class ScanNetDataset(Dataset):
-    def __init__(self, phase, scene_dir, patch_size=10, img_wh=[640, 512],):
+    def __init__(self, phase, scene_dir, img_wh=[640, 512]):
         self.phase = phase  # do something for a real dataset.
         self.scene_dir = scene_dir
-        self.patch_size = patch_size
+
         scene_files = glob.glob(os.path.join(scene_dir, '*/*vh_clean_2.ply'))
         if self.phase == 'train':
             scene_files = sorted(scene_files)
-            #print('?????????????????????????????????scene_files????????',scene_files)
-            #del scene_files[1200:]
-            del scene_files[1:]
-            #scene_files = scene_files[0]
+            del scene_files[1200:]
             scene_files = scene_files * 2
             random.shuffle(scene_files)
             self.scene_files = scene_files
         elif self.phase == 'val':
             scene_files = sorted(scene_files)
-            #self.scene_files = scene_files[1200:]
-            del scene_files[1:]
-            self.scene_files = scene_files
+            self.scene_files = scene_files[1200:]
         else:
             self.scene_files = []
         
@@ -44,20 +39,20 @@ class ScanNetDataset(Dataset):
 
     def __len__(self):
         if self.phase == 'train':
-            return 1 ###len(self.scene_files)
+            return len(self.scene_files)
         elif self.phase == 'val':
-            return 1 ###100
+            return 100
         else:
             return 100
     
     def sample_ray(self, filename):
         nerf_dir = os.path.dirname(filename)
-        image_paths = np.loadtxt(os.path.join(nerf_dir, 'images.txt'), dtype=str).tolist()
-        image_path = random.choice(image_paths)
+        ###image_paths = np.loadtxt(os.path.join(nerf_dir, 'images.txt'), dtype=str).tolist()
+        ###image_path = random.choice(image_paths)
         
         #image_paths = os.listdir(os.path.join(nerf_dir,'color'))
         #image_path = random.choice(image_paths)
-        ##image_path = str(random.randint(0, 10)) + '.jpg' ### min num_images is 115 across all scenes
+        image_path = str(random.randint(0, 10)) + '.jpg' ### min num_images is 115 across all scenes
         #image_path = '0.jpg'
         
         # read imgs
@@ -91,34 +86,23 @@ class ScanNetDataset(Dataset):
         return rays_o, rays_d, rgbs, image_path
 
     def __getitem__(self, i):
-        #print('i?????????????????????????',i)
         filename = self.scene_files[i]
-        #print('i?????????????????????????',i)
-        #print('filename??????????????????',filename)
 
         if self.phase == 'train':
             rays_o = []
             rays_d = []
             rgbs = []
-            for j in range(10):
+            for j in range(32):
                 rays_o_, rays_d_, rgbs_, image_path = self.sample_ray(filename)
-                rays_o_, rays_d_, rgbs_ = grid_sample_rays(rays_o_, rays_d_, rgbs_, self.patch_size, self.patch_size)
                 rays_o_ = rays_o_.reshape(-1, 3)
                 rays_d_ = rays_d_.reshape(-1, 3)
                 rgbs_ = rgbs_.reshape(-1, 3)
-                rays_o.append(rays_o_)
-                rays_d.append(rays_d_)
-                rgbs.append(rgbs_)
-            '''
-                rays_o_ = rays_o_.reshape(-1, 3)
-                rays_d_ = rays_d_.reshape(-1, 3)
-                rgbs_ = rgbs_.reshape(-1, 3)
-            
+
                 idx = torch.randperm(rays_o_.shape[0])[:10000]
                 rays_o.append(rays_o_[idx])
                 rays_d.append(rays_d_[idx])
                 rgbs.append(rgbs_[idx])
-            '''
+            
             rays_o = torch.cat(rays_o, dim=0)
             rays_d = torch.cat(rays_d, dim=0)
             rgbs = torch.cat(rgbs, dim=0)
@@ -141,7 +125,7 @@ class ScanNetDataset(Dataset):
             delta_scale = 0.1
         
         aa = points_raw.min(0)[0][None]
-        bb = points_raw.max(0)[0][None]  
+        bb = points_raw.max(0)[0][None]
         aa = aa - delta_scale * (bb - aa)
         bb = bb + delta_scale * (bb - aa)
         aabb = torch.cat([aa, bb], dim=0)
@@ -149,19 +133,37 @@ class ScanNetDataset(Dataset):
         C = 4
         resolution = 256
         points = (points_raw - aa) / (bb - aa + 1e-12)
+        colors = features ###
+    
         index_points = (points * (resolution - 1)).long()
         index_rgba = torch.cat([features, torch.ones_like(features[:, 0:1])], dim=1).transpose(0, 1) # [4, N]
 
         index = index_points[:, 2] + resolution * (index_points[:, 1] + resolution * index_points[:, 0])
         voxels = torch.zeros(C, resolution**3)
-        scatter_mean(index_rgba, index, out=voxels) # B x C x reso^3
+        voxels = scatter_mean(index_rgba, index, out=voxels) # B x C x reso^3
         voxels = voxels.reshape(C, resolution, resolution, resolution) # sparce matrix (B x 512 x reso x reso)
+        
+        ### for conv_onet like encoder
+        #points = points - 0.5 ### ([0,1] -> [-0.5,0.5])
+        ########################################sz
+        # return {
+        #     "rays_o": rays_o,
+        #     "rays_d": rays_d,
+        #     "rgbs": rgbs,
+        #     "aabb": aabb,
+        #     "voxels": voxels,
+        #     "paths": filename,
+        #     "filename": image_path
+        # }
+        ########################################sz
         return {
             "rays_o": rays_o,
             "rays_d": rays_d,
             "rgbs": rgbs,
             "aabb": aabb,
             "voxels": voxels,
+            "points": points,
+            "colors": colors,
             "paths": filename,
             "filename": image_path
         }

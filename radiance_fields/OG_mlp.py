@@ -266,17 +266,3 @@ class TriVolNeRFRadianceField_Latent(nn.Module):
         rgb = f[..., :self.rgb_dim]
         sigma = f[..., self.rgb_dim:]
         return rgb, F.relu(sigma)
-
-class ConvolutionalMLP(nn.Module):
-    def __init__(
-        self,
-        in_channels: int = 16
-    ):
-        super().__init__()
-        self.conv_layer = nn.Conv2d(16, 3, 3, padding = 1)
-        self.sigmoid = nn.Sigmoid()
-    def forward(self, x):
-        x = self.conv_layer(x)
-        x = self.sigmoid(x)
-        return x
-

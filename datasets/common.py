@@ -38,6 +38,38 @@ def get_ray_directions_opencv(W, H, fx, fy, cx, cy):
 
     return directions
 
+def grid_sample_rays(rays_o, rays_d, rgbs, height, width, sampling_frequency = 3, ):
+    """
+    Returns an evenly-sampled set of rays from the original set via grid sampling
+
+    Inputs:
+        rays_o: (H*W, 3), the origin of the rays in world coordinate
+        rays_d: (H*W, 3), the normalized direction of the rays in world coordinate
+        height: number of rays in the Y direction
+        width: number of rays in the X direction
+
+    Outputs:
+        rays_o: (H*W, 3), the origin of the rays in world coordinate
+        rays_d: (H*W, 3), the normalized direction of the rays in world coordinate
+    """
+    # Get the sampling indices (linearly sampling)
+    old_height, old_width = rays_o.shape[:-1]
+    possible_row_indices = np.arange(0, old_height - 1, sampling_frequency, dtype=int)
+    possible_col_indices = np.arange(0, old_width - 1, sampling_frequency, dtype=int)
+    
+    row_sel = random.randint(0, len(possible_row_indices) - height)
+    col_sel = random.randint(0, len(possible_col_indices) - width)
+
+    row_indices = possible_row_indices[row_sel:row_sel+height]
+    col_indices = possible_col_indices[col_sel:col_sel+width]
+
+    rays_o = rays_o[row_indices[:, np.newaxis], col_indices]
+    rays_d = rays_d[row_indices[:, np.newaxis], col_indices]
+    rgbs = rgbs[row_indices[:, np.newaxis], col_indices]
+    
+    #print(rays_o.shape )
+
+    return rays_o, rays_d, rgbs
 
 def get_rays(directions, c2w):
     """
