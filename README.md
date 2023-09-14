@@ -1,6 +1,7 @@
 # Modified TriVol: Point Cloud Rendering via Triple Volumes 
 This is a modification of the original paper by Hu, Tao and Xu, Xiaogang and Chu, Ruihang and Jia, Jiaya. <br>
-This version of TriVol includes a patch-based ray-sampler and convolutional MLP in order to introduce spatial inductive bias.
+This version of TriVol includes a patch-based ray-sampler and convolutional MLP in order to introduce spatial inductive bias. It also includes an inference procedure.
+
 The original paper is cited below. 
 ## Citation
 ```
